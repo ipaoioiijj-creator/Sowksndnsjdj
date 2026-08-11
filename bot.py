@@ -149,6 +149,7 @@ def admin_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="♻️ Чёрный список"),
             ],
             [KeyboardButton(text="🧹 Очистить игрока")],
+            [KeyboardButton(text="👥 Пользователи")],
             [KeyboardButton(text="💥 Очистить всё")],
             [KeyboardButton(text="🔙 Главное меню")],
         ],
@@ -368,6 +369,23 @@ async def clear_player_start(message: Message) -> None:
     await message.answer(
         "🧹 Введите юзернейм:",
         reply_markup=cancel_keyboard(),
+    )
+
+
+@dp.message(F.text == "👥 Пользователи")
+async def users_count(message: Message) -> None:
+    if not is_owner(message):
+        return
+
+    row = db.execute(
+        "SELECT COUNT(*) AS count FROM users"
+    ).fetchone()
+
+    count = row["count"] if row else 0
+
+    await message.answer(
+        f"👥 Число пользователей в боте: {count}",
+        reply_markup=admin_keyboard(),
     )
 
 
