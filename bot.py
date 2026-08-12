@@ -11,7 +11,7 @@ from aiogram.filters import CommandStart
 from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
 
-BOT_TOKEN = "8847602234:AAHe8M4FEX60FqN9k7PRnF7DPCMFqxU_9rw"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = 5134277438
 OWNER_USERNAME = "@emptinessdurka"
 
@@ -149,6 +149,7 @@ def admin_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="♻️ Чёрный список"),
             ],
             [KeyboardButton(text="🧹 Очистить игрока")],
+            [KeyboardButton(text="👥 Пользователи")],
             [KeyboardButton(text="💥 Очистить всё")],
             [KeyboardButton(text="🔙 Главное меню")],
         ],
@@ -368,6 +369,23 @@ async def clear_player_start(message: Message) -> None:
     await message.answer(
         "🧹 Введите юзернейм:",
         reply_markup=cancel_keyboard(),
+    )
+
+
+@dp.message(F.text == "👥 Пользователи")
+async def users_count(message: Message) -> None:
+    if not is_owner(message):
+        return
+
+    row = db.execute(
+        "SELECT COUNT(*) AS count FROM users"
+    ).fetchone()
+
+    count = row["count"] if row else 0
+
+    await message.answer(
+        f"👥 Число пользователей в боте: {count}",
+        reply_markup=admin_keyboard(),
     )
 
 
