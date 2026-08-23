@@ -8,7 +8,14 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
-from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+)
+
 
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -51,6 +58,7 @@ dp = Dispatcher()
 
 # Состояние админ-панели. В боте только один владелец.
 admin_states: dict[int, str] = {}
+profile_states: dict[int, str] = {}
 
 
 def ensure_user(user_id: int, username: str | None) -> None:
@@ -75,11 +83,20 @@ def get_user(user_id: int):
     ).fetchone()
 
 
-def find_user(username: str):
-    username = username.strip().lstrip("@").lower()
+def find_user(identifier: str):
+    identifier = identifier.strip()
 
-    if not username:
+    if not identifier:
         return None
+
+    # Поддержка как @username/username, так и числового Telegram ID.
+    if identifier.lstrip("-").isdigit():
+        return db.execute(
+            "SELECT * FROM users WHERE user_id = ? LIMIT 1",
+            (int(identifier),),
+        ).fetchone()
+
+    username = identifier.lstrip("@").lower()
 
     return db.execute(
         """
@@ -122,6 +139,33 @@ def format_remaining(seconds: int) -> str:
     return f"{seconds} сек."
 
 
+def get_rank(user_id: int):
+    row = db.execute(
+        """
+        SELECT 1 + COUNT(*) AS rank
+        FROM users AS other
+        WHERE other.points > (
+            SELECT points FROM users WHERE user_id = ?
+        )
+        """,
+        (user_id,),
+    ).fetchone()
+    return row["rank"] if row else None
+
+
+def profile_inline_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔎 Посмотреть профиль",
+                    callback_data="profile_lookup",
+                )
+            ]
+        ]
+    )
+
+
 def main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     rows = [
         [KeyboardButton(text="🎁 Получить очки")],
@@ -129,6 +173,7 @@ def main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
             KeyboardButton(text="👤 Профиль"),
             KeyboardButton(text="🏆 Лидеры"),
         ],
+        [KeyboardButton(text="📰 Новости")],
     ]
 
     if user_id == OWNER_ID:
@@ -150,6 +195,7 @@ def admin_keyboard() -> ReplyKeyboardMarkup:
             ],
             [KeyboardButton(text="🧹 Очистить игрока")],
             [KeyboardButton(text="👥 Пользователи")],
+            [KeyboardButton(text="📢 Рассылка")],
             [KeyboardButton(text="💥 Очистить всё")],
             [KeyboardButton(text="🔙 Главное меню")],
         ],
@@ -269,11 +315,38 @@ async def profile(message: Message) -> None:
     if row is None:
         return
 
+    rank = get_rank(row["user_id"])
+
     await message.answer(
         "👤 <b>Ваш профиль:</b>\n"
         f"Юзернейм - {username_text(row)}\n"
-        f"Очки - {row['points']} 💰",
+        f"Очки - {row['points']} 💰\n"
+        f"Место в топе - {rank} 🏆",
+        reply_markup=profile_inline_keyboard(),
+    )
+    await message.answer(
+        "🏠 Главное меню",
         reply_markup=main_keyboard(message.from_user.id),
+    )
+
+
+@dp.message(F.text == "📰 Новости")
+async def news(message: Message) -> None:
+    if not await check_access(message):
+        return
+
+    await message.answer(
+        "📰 <b>Новости</b>",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="📰 Открыть новостной канал",
+                        url="https://t.me/points_collector_channel",
+                    )
+                ]
+            ]
+        ),
     )
 
 
@@ -305,6 +378,20 @@ async def leaders(message: Message) -> None:
     await message.answer(
         text,
         reply_markup=main_keyboard(message.from_user.id),
+    )
+
+
+@dp.callback_query(F.data == "profile_lookup")
+async def profile_lookup_callback(callback) -> None:
+    user = callback.from_user
+    if user is None:
+        return
+
+    profile_states[user.id] = "lookup"
+    await callback.answer()
+    await callback.message.answer(
+        "🔎 Введите юзернейм или ID пользователя:",
+        reply_markup=cancel_keyboard() if user.id == OWNER_ID else None,
     )
 
 
@@ -389,6 +476,18 @@ async def users_count(message: Message) -> None:
     )
 
 
+@dp.message(F.text == "📢 Рассылка")
+async def broadcast_start(message: Message) -> None:
+    if not is_owner(message):
+        return
+
+    admin_states[OWNER_ID] = "broadcast"
+    await message.answer(
+        "📢 Введите сообщение для рассылки всем пользователям бота.",
+        reply_markup=cancel_keyboard(),
+    )
+
+
 @dp.message(F.text == "💥 Очистить всё")
 async def clear_all_start(message: Message) -> None:
     if not is_owner(message):
@@ -409,6 +508,7 @@ async def cancel(message: Message) -> None:
         return
 
     admin_states.pop(OWNER_ID, None)
+    profile_states.pop(message.from_user.id, None)
 
     await message.answer(
         "❌ Действие отменено.",
@@ -431,6 +531,29 @@ async def back_to_menu(message: Message) -> None:
 
 @dp.message()
 async def admin_input(message: Message) -> None:
+    # Поиск профиля доступен всем пользователям.
+    if message.from_user is not None:
+        profile_state = profile_states.get(message.from_user.id)
+        if profile_state == "lookup":
+            identifier = (message.text or "").strip()
+            row = find_user(identifier)
+
+            if row is None:
+                await message.answer("❌ Пользователь не найден.")
+                return
+
+            profile_states.pop(message.from_user.id, None)
+            rank = get_rank(row["user_id"])
+
+            await message.answer(
+                "👤 <b>Профиль пользователя</b>\n"
+                f"Юзернейм - {username_text(row)}\n"
+                f"Баланс - {row['points']} 💰\n"
+                f"Место в топе - {rank} 🏆",
+                reply_markup=main_keyboard(message.from_user.id),
+            )
+            return
+
     if not is_owner(message):
         return
 
@@ -439,6 +562,37 @@ async def admin_input(message: Message) -> None:
         return
 
     text = (message.text or "").strip()
+
+    if state == "broadcast":
+        if not text:
+            await message.answer(
+                "❌ Сообщение не может быть пустым.",
+                reply_markup=cancel_keyboard(),
+            )
+            return
+
+        rows = db.execute(
+            "SELECT user_id FROM users WHERE banned = 0"
+        ).fetchall()
+
+        admin_states.pop(OWNER_ID, None)
+        sent = 0
+        failed = 0
+
+        for row in rows:
+            try:
+                await bot.send_message(row["user_id"], text)
+                sent += 1
+            except Exception:
+                failed += 1
+
+        await message.answer(
+            f"📢 Рассылка завершена.\n"
+            f"✅ Доставлено: {sent}\n"
+            f"❌ Не доставлено: {failed}",
+            reply_markup=admin_keyboard(),
+        )
+        return
 
     if state == "ban":
         row = find_user(text)
